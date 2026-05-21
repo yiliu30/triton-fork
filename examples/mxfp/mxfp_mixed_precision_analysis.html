@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mixed-Precision MXFP Flash Attention Analysis</title>
+<style>
+:root { --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --border: #30363d; --card: #161b22; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; background: var(--bg); color: var(--fg); line-height: 1.6; padding: 2rem; max-width: 1200px; margin: 0 auto; }
+h1 { color: var(--accent); font-size: 1.8rem; margin-bottom: 0.5rem; }
+h2 { color: var(--accent); font-size: 1.3rem; margin: 2rem 0 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+h3 { color: var(--yellow); font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+p, li { margin-bottom: 0.5rem; }
+ul { padding-left: 1.5rem; }
+.subtitle { color: #8b949e; font-size: 0.9rem; margin-bottom: 2rem; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
+.winner { border-left: 4px solid var(--green); }
+.loser { border-left: 4px solid var(--red); }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.85rem; }
+th, td { padding: 0.5rem 0.8rem; text-align: left; border: 1px solid var(--border); }
+th { background: #21262d; color: var(--accent); font-weight: 600; }
+tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+.good { color: var(--green); font-weight: 600; }
+.bad { color: var(--red); font-weight: 600; }
+.neutral { color: var(--yellow); }
+.math { background: #1c2128; padding: 1rem; border-radius: 6px; font-family: 'Courier New', monospace; font-size: 0.85rem; overflow-x: auto; margin: 0.5rem 0; }
+.tag { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+.tag-best { background: rgba(63,185,80,0.2); color: var(--green); }
+.tag-worst { background: rgba(248,81,73,0.2); color: var(--red); }
+.tag-mid { background: rgba(210,153,34,0.2); color: var(--yellow); }
+.flex { display: flex; gap: 1rem; flex-wrap: wrap; }
+.flex > * { flex: 1; min-width: 280px; }
+code { background: #1c2128; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.85rem; }
+.gen-example { font-size: 0.8rem; padding: 0.4rem 0.8rem; background: #1c2128; border-radius: 4px; margin: 0.3rem 0; white-space: pre-wrap; word-break: break-all; }
+.verdict-box { background: rgba(63,185,80,0.1); border: 2px solid var(--green); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; text-align: center; }
+.verdict-box h3 { color: var(--green); margin: 0 0 0.5rem; }
+</style>
+</head>
+<body>
+
+<h1>Mixed-Precision MXFP Flash Attention</h1>
+<p class="subtitle">Analysis on NVIDIA B200 (sm_100) &bull; Qwen3-0.6B &bull; Triton kernel with <code>tl.dot_scaled</code></p>
+
+<h2>1. Problem Statement</h2>
+<div class="card">
+<p>Pure MXFP4 (E2M1) attention suffers catastrophic accuracy loss (~25 PPL increase). We investigate <strong>mixed-precision</strong>: use higher precision for one GEMM and lower for the other.</p>
+<p>Two candidates:</p>
+<ul>
+<li><strong>MXFP8 QK + MXFP4 PV</strong> — high precision for attention routing, low for value aggregation</li>
+<li><strong>MXFP4 QK + MXFP8 PV</strong> — low precision for routing, high for value aggregation</li>
+</ul>
+</div>
+
+<h2>2. Mathematical Analysis</h2>
+
+<h3>Why QK Precision Matters More</h3>
+<div class="card">
+<p>Attention: <code>O = softmax(QK<sup>T</sup>/√d) · V = P · V</code></p>
+
+<p><strong>QK GEMM error propagation (exponential):</strong></p>
+<div class="math">
+ΔP_ij = P_ij · (ΔS_ij − E_P[ΔS])    ← softmax Jacobian
+Var(ΔS_ij) ≈ 2σ²_ε · d               ← grows with head_dim
+
+For d=128, MXFP4 (σ_ε≈0.2): std(ΔS) ≈ 3.2  → KL div ≈ 5.1 (distribution destroyed)
+For d=128, MXFP8 (σ_ε≈0.04): std(ΔS) ≈ 0.64 → KL div ≈ 0.2 (distribution preserved)
+</div>
+
+<p><strong>PV GEMM error propagation (linear):</strong></p>
+<div class="math">
+ΔO = ΔP·V + P·ΔV    ← linear, bounded by ||P||₁ = 1
+No exponential amplification. Errors add noise but don't corrupt routing.
+</div>
+
+<p><strong>Information-theoretic view:</strong> QK determines <em>where</em> to look (routing) — errors cause irreversible information loss. PV determines <em>what</em> to extract — errors cause graceful degradation.</p>
+</div>
+
+<h2>3. Kernel Performance (B200)</h2>
+
+<table>
+<tr><th>Variant</th><th>N=2048</th><th>N=4096</th><th>N=8192</th><th>N=65536</th><th>vs MXFP8</th></tr>
+<tr><td>Pure MXFP8</td><td>507 TF</td><td>528 TF</td><td>543 TF</td><td>615 TF</td><td>1.00x</td></tr>
+<tr><td>Pure MXFP4</td><td>555 TF</td><td>584 TF</td><td>602 TF</td><td>696 TF</td><td class="good">1.13x</td></tr>
+<tr><td><strong>MXFP8 QK + MXFP4 PV</strong></td><td>527 TF</td><td>555 TF</td><td>570 TF</td><td>664 TF</td><td class="good">1.08x</td></tr>
+<tr><td>MXFP4 QK + MXFP8 PV</td><td>526 TF</td><td>554 TF</td><td>567 TF</td><td>643 TF</td><td class="neutral">1.05x</td></tr>
+</table>
+<p style="font-size:0.8rem; color:#8b949e;">Config: B=2, H=32, D=128, non-causal. TFLOPS = 4·B·H·N²·D / time.</p>
+
+<h2>4. End-to-End Results: Qwen3-0.6B</h2>
+
+<h3>4.1 Perplexity</h3>
+<table>
+<tr><th>Variant</th><th>Text 0</th><th>Text 1</th><th>Text 2</th><th>Text 3</th><th>Text 4</th><th>Avg PPL</th><th>Δ</th></tr>
+<tr><td>FP16 SDPA</td><td>10.52</td><td>8.12</td><td>2.78</td><td>2.71</td><td>5.03</td><td>5.83</td><td>—</td></tr>
+<tr><td>Pure MXFP8</td><td>10.83</td><td>8.14</td><td>2.80</td><td>2.74</td><td>4.95</td><td class="good">5.89</td><td class="good">+0.06</td></tr>
+<tr><td><strong>MXFP8 QK + MXFP4 PV</strong></td><td>10.87</td><td>8.65</td><td>2.86</td><td>3.18</td><td>4.61</td><td class="good">6.03</td><td class="good">+0.20</td></tr>
+<tr><td>MXFP4 QK + MXFP8 PV</td><td>121.06</td><td>17.00</td><td>7.96</td><td>6.13</td><td>9.87</td><td class="bad">32.40</td><td class="bad">+26.6</td></tr>
+<tr><td>Pure MXFP4</td><td>105.34</td><td>19.97</td><td>9.02</td><td>8.24</td><td>10.12</td><td class="bad">30.54</td><td class="bad">+24.7</td></tr>
+</table>
+
+<h3>4.2 Logit Quality vs FP16</h3>
+<table>
+<tr><th>Variant</th><th>Cosine Sim</th><th>5th %ile</th><th>KL Div</th><th>Top-1 Acc</th><th>Top-5 Acc</th><th>Worst cos</th></tr>
+<tr><td>Pure MXFP8</td><td class="good">0.9976</td><td class="good">0.9952</td><td class="good">0.013</td><td class="good">95.4%</td><td class="good">100%</td><td class="good">0.986</td></tr>
+<tr><td><strong>MXFP8 QK + MXFP4 PV</strong></td><td class="good">0.9717</td><td class="good">0.9398</td><td class="good">0.099</td><td class="good">86.8%</td><td class="good">99.6%</td><td class="neutral">0.832</td></tr>
+<tr><td>MXFP4 QK + MXFP8 PV</td><td class="bad">0.8377</td><td class="bad">0.6123</td><td class="bad">0.990</td><td class="bad">62.8%</td><td class="bad">89.3%</td><td class="bad">-0.212</td></tr>
+<tr><td>Pure MXFP4</td><td class="bad">0.7801</td><td class="bad">0.4987</td><td class="bad">1.114</td><td class="bad">60.0%</td><td class="bad">86.7%</td><td class="bad">-0.145</td></tr>
+</table>
+
+<h3>4.3 Generation Quality (Greedy, 128 tokens)</h3>
+<table>
+<tr><th>Variant</th><th>Avg Token Match</th><th>Quality</th></tr>
+<tr><td>Pure MXFP8</td><td class="good">38.9%</td><td><span class="tag tag-best">Near-lossless</span></td></tr>
+<tr><td>MXFP8 QK + MXFP4 PV</td><td class="good">31.2%</td><td><span class="tag tag-mid">Minor drift</span></td></tr>
+<tr><td>MXFP4 QK + MXFP8 PV</td><td class="bad">19.8%</td><td><span class="tag tag-worst">Broken</span></td></tr>
+<tr><td>Pure MXFP4</td><td class="bad">17.3%</td><td><span class="tag tag-worst">Broken</span></td></tr>
+</table>
+
+<h3>4.4 Generation Examples</h3>
+<div class="card">
+<p><strong>Prompt:</strong> <code>"def binary_search(arr, target):\n    \"\"\"Find target in sorted array, return index or -1.\"\"\""</code></p>
+<div class="gen-example"><strong>FP16:</strong>    left = 0; right = len(arr) - 1; while left <= right: mid = (left + right) // 2...</div>
+<div class="gen-example"><strong>MXFP8:</strong>   <span class="good">[IDENTICAL]</span></div>
+<div class="gen-example"><strong>FP8QK+FP4PV:</strong> <span class="good">[IDENTICAL]</span></div>
+<div class="gen-example"><strong>FP4QK+FP8PV:</strong> <span class="bad">if n <= 0: if n == 0: return 0 ... [garbage]</span></div>
+</div>
+
+<div class="card">
+<p><strong>Prompt:</strong> <code>"The capital of France is"</code></p>
+<div class="gen-example"><strong>FP16:</strong>  Paris. The capital of Italy is Rome. The capital of Spain is Madrid.</div>
+<div class="gen-example"><strong>MXFP8:</strong> <span class="good">[IDENTICAL]</span></div>
+<div class="gen-example"><strong>FP8QK+FP4PV:</strong> <span class="neutral">Paris. The capital of Italy is Rome. The capital of Japan is Tokyo.</span> (minor drift)</div>
+<div class="gen-example"><strong>FP4QK+FP8PV:</strong> <span class="bad">a country that has a population of the population of France...</span> (nonsense)</div>
+</div>
+
+<h2>5. Why Synthetic Benchmarks Were Misleading</h2>
+<div class="card">
+<p>A synthetic sweep (random inputs, cos_sim vs dequantized reference) showed MXFP4 QK + MXFP8 PV matching MXFP8 accuracy. This was because:</p>
+<ul>
+<li><strong>Random inputs (randn×0.1)</strong> keep logits small → softmax stays flat → QK errors don't cause attention flips</li>
+<li><strong>Comparing to dequantized inputs</strong> only measures kernel numerical error, not quantization impact</li>
+<li><strong>Real models have sharp attention patterns</strong> — small logit noise can flip the argmax and cause catastrophic routing failure</li>
+</ul>
+<p><em>Lesson: Always validate on real model inference, not synthetic random data.</em></p>
+</div>
+
+<h2>6. Summary</h2>
+
+<div class="flex">
+<div class="card winner">
+<h3>✓ MXFP8 QK + MXFP4 PV <span class="tag tag-best">RECOMMENDED</span></h3>
+<ul>
+<li>PPL: +0.20 vs FP16 (negligible)</li>
+<li>Top-1 accuracy: 86.8%</li>
+<li>Performance: <strong>1.08x</strong> faster than pure MXFP8</li>
+<li>Worst-case cos_sim: 0.83 (safe)</li>
+</ul>
+</div>
+<div class="card loser">
+<h3>✗ MXFP4 QK + MXFP8 PV <span class="tag tag-worst">DO NOT USE</span></h3>
+<ul>
+<li>PPL: +26.6 vs FP16 (catastrophic)</li>
+<li>Top-1 accuracy: 62.8%</li>
+<li>Performance: 1.05x faster than pure MXFP8</li>
+<li>Worst-case cos_sim: <strong>-0.21</strong> (inverted!)</li>
+</ul>
+</div>
+</div>
+
+<div class="verdict-box">
+<h3>VERDICT</h3>
+<p style="font-size:1.1rem;"><strong>Use MXFP8 for QK (attention routing) + MXFP4 for PV (value aggregation)</strong></p>
+<p style="color:#8b949e;">8% faster than pure MXFP8 with &lt;0.2 PPL increase. QK precision is non-negotiable.</p>
+</div>
+
+<h2>7. Implementation</h2>
+<div class="card">
+<table>
+<tr><th>File</th><th>Description</th></tr>
+<tr><td><code>mxfp8_qk_mxfp4_pv_flash_attention.py</code></td><td>Recommended mixed kernel</td></tr>
+<tr><td><code>mxfp4_qk_mxfp8_pv_flash_attention.py</code></td><td>Reference (do not use in production)</td></tr>
+<tr><td><code>sweep_mxfp_attention.py</code></td><td>Synthetic perf/accuracy sweep</td></tr>
+<tr><td><code>sweep_e2e_qwen.py</code></td><td>Basic e2e Qwen evaluation</td></tr>
+<tr><td><code>sweep_e2e_qwen_strict.py</code></td><td>Strict e2e (KL, top-k, worst-case)</td></tr>
+</table>
+<p style="font-size:0.8rem; color:#8b949e; margin-top:0.5rem;">All kernels use <code>tl.dot_scaled</code> with <code>tcgen05.mma</code> on B200. Tested with Triton fork at <code>/home/yiliu7/workspace/triton-fork</code>.</p>
+</div>
+
+</body>
+</html>
