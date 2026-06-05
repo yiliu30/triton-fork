@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Flash Attention Stages Visualization</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1419; color: #e8e8e8; padding: 40px; line-height: 1.6; }
+h1 { text-align: center; font-size: 2rem; margin-bottom: 10px; color: #7dd3fc; }
+h2 { font-size: 1.4rem; margin: 40px 0 16px; color: #a5f3fc; border-bottom: 1px solid #334155; padding-bottom: 8px; }
+h3 { font-size: 1.1rem; margin: 20px 0 10px; color: #93c5fd; }
+.subtitle { text-align: center; color: #94a3b8; margin-bottom: 40px; }
+.container { max-width: 1100px; margin: 0 auto; }
+
+/* Section 1: Causal Stages */
+.matrix-container { display: flex; gap: 40px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+.matrix-box { background: #1e293b; border-radius: 12px; padding: 24px; border: 1px solid #334155; }
+.matrix-box h4 { text-align: center; margin-bottom: 12px; color: #e2e8f0; font-size: 0.95rem; }
+.matrix { display: grid; gap: 2px; }
+.cell { width: 36px; height: 36px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 0.6rem; font-weight: 600; }
+.cell-stage1 { background: #2563eb; color: #bfdbfe; }
+.cell-stage2 { background: #d97706; color: #fef3c7; }
+.cell-masked { background: #1e1e2e; color: #475569; }
+.cell-full { background: #059669; color: #a7f3d0; }
+
+.legend { display: flex; gap: 20px; justify-content: center; margin: 20px 0; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; }
+.legend-color { width: 20px; height: 20px; border-radius: 4px; }
+
+/* Section 2: Software Pipelining */
+.pipeline-container { margin: 20px 0; overflow-x: auto; }
+.pipeline { display: grid; gap: 3px; padding: 16px; background: #1e293b; border-radius: 12px; border: 1px solid #334155; }
+.pipeline-header { font-weight: 700; font-size: 0.75rem; color: #94a3b8; display: flex; align-items: center; justify-content: center; padding: 6px 4px; }
+.pipe-cell { padding: 8px 6px; border-radius: 6px; text-align: center; font-size: 0.7rem; font-weight: 600; min-width: 80px; }
+.pipe-load { background: #7c3aed; color: #ede9fe; }
+.pipe-compute { background: #0891b2; color: #cffafe; }
+.pipe-store { background: #dc2626; color: #fecaca; }
+.pipe-idle { background: #1a1a2e; color: #475569; border: 1px dashed #334155; }
+.pipe-overlap { background: linear-gradient(135deg, #7c3aed 50%, #0891b2 50%); color: white; }
+
+.time-arrow { text-align: center; margin: 8px 0; color: #64748b; font-size: 0.85rem; }
+
+/* Section 3: Combined view */
+.code-ref { background: #1e293b; border-radius: 8px; padding: 16px 20px; border-left: 4px solid #7c3aed; margin: 12px 0; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: #cbd5e1; overflow-x: auto; white-space: pre; }
+.highlight { color: #fbbf24; }
+.comment { color: #6b7280; font-style: italic; }
+
+/* Explanation cards */
+.card { background: #1e293b; border-radius: 12px; padding: 20px 24px; margin: 16px 0; border: 1px solid #334155; }
+.card p { color: #cbd5e1; font-size: 0.9rem; margin: 6px 0; }
+.card code { background: #334155; padding: 2px 6px; border-radius: 4px; font-size: 0.82rem; color: #a5f3fc; }
+
+/* Num stages comparison */
+.stages-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin: 20px 0; }
+
+/* Animation */
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+.active { animation: pulse 1.5s infinite; }
+
+.tab-container { display: flex; gap: 4px; margin-bottom: 16px; }
+.tab { padding: 8px 16px; border-radius: 8px 8px 0 0; cursor: pointer; background: #334155; color: #94a3b8; font-size: 0.85rem; border: none; }
+.tab.active-tab { background: #1e293b; color: #7dd3fc; border: 1px solid #334155; border-bottom: none; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Flash Attention Stages in Triton</h1>
+<p class="subtitle">Based on <code>06-fused-attention.py</code> &mdash; Two distinct meanings of "stage"</p>
+
+<!-- ============ PART 1: Causal Stages ============ -->
+<h2>1. Causal Masking Stages (STAGE parameter)</h2>
+
+<div class="card">
+<p>The <code>STAGE</code> parameter controls how the attention matrix is partitioned for <strong>causal masking</strong>:</p>
+<p>&bull; <code>STAGE=3</code> (causal=True): Split into Stage 1 (off-diagonal, no mask needed) + Stage 2 (on-diagonal, apply mask)</p>
+<p>&bull; <code>STAGE=1</code> (causal=False): Process everything in one pass (Stage 3 internally = full range, no mask)</p>
+</div>
+
+<div class="matrix-container">
+<!-- Causal attention matrix -->
+<div class="matrix-box">
+<h4>Causal Mode (STAGE=3)</h4>
+<div class="matrix" style="grid-template-columns: repeat(8, 36px);" id="causal-matrix"></div>
+<p style="text-align:center; margin-top:10px; font-size:0.75rem; color:#64748b;">Q rows (BLOCK_M) &times; K columns (BLOCK_N)</p>
+</div>
+
+<!-- Non-causal -->
+<div class="matrix-box">
+<h4>Non-Causal Mode (STAGE=1)</h4>
+<div class="matrix" style="grid-template-columns: repeat(8, 36px);" id="noncausal-matrix"></div>
+<p style="text-align:center; margin-top:10px; font-size:0.75rem; color:#64748b;">Full attention &mdash; no masking</p>
+</div>
+</div>
+
+<div class="legend">
+<div class="legend-item"><div class="legend-color" style="background:#2563eb;"></div> Stage 1: Off-band (no mask)</div>
+<div class="legend-item"><div class="legend-color" style="background:#d97706;"></div> Stage 2: On-band (causal mask)</div>
+<div class="legend-item"><div class="legend-color" style="background:#1e1e2e; border:1px solid #475569;"></div> Masked out (-inf)</div>
+<div class="legend-item"><div class="legend-color" style="background:#059669;"></div> Full (non-causal)</div>
+</div>
+
+<div class="code-ref"><span class="comment"># In _attn_fwd_inner:</span>
+if STAGE == 1:                          <span class="comment"># Off-band: fully valid region</span>
+    lo, hi = 0, start_m * BLOCK_M
+elif STAGE == 2:                        <span class="comment"># On-band: diagonal block with causal mask</span>
+    lo, hi = start_m * BLOCK_M, (start_m + 1) * BLOCK_M
+else:                                   <span class="comment"># STAGE == 3: non-causal, full range</span>
+    lo, hi = 0, N_CTX</div>
+
+<h3>How the kernel dispatches stages:</h3>
+<div class="code-ref"><span class="comment"># In _attn_fwd (the main kernel):</span>
+<span class="highlight">if STAGE & 1:</span>   <span class="comment"># True for STAGE=1 (non-causal) and STAGE=3 (causal)</span>
+    <span class="comment"># Calls _attn_fwd_inner with STAGE = 4-STAGE</span>
+    <span class="comment"># STAGE=3 &rarr; inner gets 1 (off-band)</span>
+    <span class="comment"># STAGE=1 &rarr; inner gets 3 (full range, no mask)</span>
+
+<span class="highlight">if STAGE & 2:</span>   <span class="comment"># True only for STAGE=3 (causal)</span>
+    <span class="comment"># Calls _attn_fwd_inner with STAGE=2 (on-band, masked)</span></div>
+
+<!-- ============ PART 2: Software Pipelining ============ -->
+<h2>2. Software Pipelining Stages (num_stages)</h2>
+
+<div class="card">
+<p><code>num_stages</code> controls <strong>how many K/V blocks are prefetched</strong> ahead of computation, hiding memory latency via async copies.</p>
+<p>The Triton compiler inserts <code>cp.async</code> (Ampere) or TMA loads (Hopper) to overlap loads with computation.</p>
+</div>
+
+<h3>num_stages = 1 (No pipelining)</h3>
+<div class="pipeline-container">
+<div class="pipeline" style="grid-template-columns: 80px repeat(6, 1fr);">
+<div class="pipeline-header">Cycle</div>
+<div class="pipeline-header">1</div><div class="pipeline-header">2</div><div class="pipeline-header">3</div><div class="pipeline-header">4</div><div class="pipeline-header">5</div><div class="pipeline-header">6</div>
+<div class="pipeline-header">SM</div>
+<div class="pipe-cell pipe-load">Load K₀V₀</div>
+<div class="pipe-cell pipe-compute">Compute₀</div>
+<div class="pipe-cell pipe-load">Load K₁V₁</div>
+<div class="pipe-cell pipe-compute">Compute₁</div>
+<div class="pipe-cell pipe-load">Load K₂V₂</div>
+<div class="pipe-cell pipe-compute">Compute₂</div>
+</div>
+</div>
+<p class="time-arrow">&#x2192; Time &mdash; SM is idle during loads (memory-bound stall)</p>
+
+<h3>num_stages = 2 (Single buffer ahead)</h3>
+<div class="pipeline-container">
+<div class="pipeline" style="grid-template-columns: 80px repeat(5, 1fr);">
+<div class="pipeline-header">Cycle</div>
+<div class="pipeline-header">1</div><div class="pipeline-header">2</div><div class="pipeline-header">3</div><div class="pipeline-header">4</div><div class="pipeline-header">5</div>
+<div class="pipeline-header">Load</div>
+<div class="pipe-cell pipe-load">K₀V₀</div>
+<div class="pipe-cell pipe-load">K₁V₁</div>
+<div class="pipe-cell pipe-load">K₂V₂</div>
+<div class="pipe-cell pipe-load">K₃V₃</div>
+<div class="pipe-cell pipe-idle">drain</div>
+<div class="pipeline-header">Compute</div>
+<div class="pipe-cell pipe-idle">wait</div>
+<div class="pipe-cell pipe-compute">Compute₀</div>
+<div class="pipe-cell pipe-compute">Compute₁</div>
+<div class="pipe-cell pipe-compute">Compute₂</div>
+<div class="pipe-cell pipe-compute">Compute₃</div>
+</div>
+</div>
+<p class="time-arrow">&#x2192; Time &mdash; Load and compute overlap! 1 block prefetched ahead</p>
+
+<h3>num_stages = 3 (Two buffers ahead)</h3>
+<div class="pipeline-container">
+<div class="pipeline" style="grid-template-columns: 80px repeat(6, 1fr);">
+<div class="pipeline-header">Cycle</div>
+<div class="pipeline-header">1</div><div class="pipeline-header">2</div><div class="pipeline-header">3</div><div class="pipeline-header">4</div><div class="pipeline-header">5</div><div class="pipeline-header">6</div>
+<div class="pipeline-header">Load</div>
+<div class="pipe-cell pipe-load">K₀V₀</div>
+<div class="pipe-cell pipe-load">K₁V₁</div>
+<div class="pipe-cell pipe-load">K₂V₂</div>
+<div class="pipe-cell pipe-load">K₃V₃</div>
+<div class="pipe-cell pipe-load">K₄V₄</div>
+<div class="pipe-cell pipe-idle">drain</div>
+<div class="pipeline-header">Compute</div>
+<div class="pipe-cell pipe-idle">wait</div>
+<div class="pipe-cell pipe-idle">wait</div>
+<div class="pipe-cell pipe-compute">Compute₀</div>
+<div class="pipe-cell pipe-compute">Compute₁</div>
+<div class="pipe-cell pipe-compute">Compute₂</div>
+<div class="pipe-cell pipe-compute">Compute₃</div>
+</div>
+</div>
+<p class="time-arrow">&#x2192; Time &mdash; 2 blocks prefetched; better latency hiding but more SMEM usage</p>
+
+<h3>Trade-offs</h3>
+<div class="stages-compare">
+<div class="card">
+<h4 style="color:#7c3aed; margin-bottom:8px;">More stages (3-4)</h4>
+<p>+ Better hides memory latency</p>
+<p>+ Higher throughput for memory-bound kernels</p>
+<p>- More shared memory for buffering</p>
+<p>- Fewer concurrent blocks per SM</p>
+<p>- Longer pipeline startup/drain</p>
+</div>
+<div class="card">
+<h4 style="color:#0891b2; margin-bottom:8px;">Fewer stages (1-2)</h4>
+<p>+ Less shared memory pressure</p>
+<p>+ More blocks can run concurrently</p>
+<p>+ Simpler; less register pressure</p>
+<p>- May stall waiting for memory</p>
+<p>- Lower utilization of memory bandwidth</p>
+</div>
+</div>
+
+<!-- ============ PART 3: Combined ============ -->
+<h2>3. Putting It Together</h2>
+
+<div class="card">
+<p>In the Triton flash attention kernel, <strong>both</strong> stage concepts work together:</p>
+</div>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0;">
+<div class="card" style="border-left: 4px solid #d97706;">
+<h4 style="color:#d97706; margin-bottom: 8px;">Causal STAGE (algorithmic)</h4>
+<p>Splits Q&times;K attention into off-band + on-band to avoid unnecessary mask computation on blocks that are fully valid.</p>
+<p style="margin-top:8px;"><code>stage = 3 if causal else 1</code></p>
+</div>
+<div class="card" style="border-left: 4px solid #7c3aed;">
+<h4 style="color:#7c3aed; margin-bottom: 8px;">num_stages (hardware)</h4>
+<p>Within each inner loop (off-band OR on-band), the compiler pipelines K/V block loads ahead of computation.</p>
+<p style="margin-top:8px;"><code>num_stages ∈ [2, 3, 4]</code> on Hopper</p>
+</div>
+</div>
+
+<div class="code-ref"><span class="comment"># From the autotuning configs (line 136):</span>
+configs = [
+    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN},
+                  <span class="highlight">num_stages=s</span>, num_warps=w)
+    for BM in [64, 128]
+    for BN in [32, 64, 128]
+    for <span class="highlight">s in [2, 3, 4]</span>      <span class="comment"># software pipelining stages</span>
+    for w in [4, 8]
+]
+
+<span class="comment"># The inner loop where pipelining applies (line 69):</span>
+for start_n in tl.range(lo, hi, BLOCK_N, warp_specialize=warp_specialize):
+    k = desc_k.load(...)   <span class="comment"># async prefetch by compiler</span>
+    qk = tl.dot(q, k)     <span class="comment"># compute overlaps with next load</span>
+    v = desc_v.load(...)
+    acc = tl.dot(p, v, acc)</div>
+
+<!-- Animated timeline -->
+<h3>Full Execution Timeline (causal, num_stages=2)</h3>
+<div class="pipeline-container">
+<div class="pipeline" style="grid-template-columns: 100px repeat(8, 1fr);">
+<div class="pipeline-header">Phase</div>
+<div class="pipeline-header">t₁</div><div class="pipeline-header">t₂</div><div class="pipeline-header">t₃</div><div class="pipeline-header">t₄</div><div class="pipeline-header">t₅</div><div class="pipeline-header">t₆</div><div class="pipeline-header">t₇</div><div class="pipeline-header">t₈</div>
+
+<div class="pipeline-header" style="font-size:0.65rem;">Stage 1<br>(off-band)</div>
+<div class="pipe-cell pipe-load" style="font-size:0.6rem;">Load K₀</div>
+<div class="pipe-cell pipe-overlap" style="font-size:0.6rem;">Load K₁<br>+Comp₀</div>
+<div class="pipe-cell pipe-overlap" style="font-size:0.6rem;">Load K₂<br>+Comp₁</div>
+<div class="pipe-cell pipe-compute" style="font-size:0.6rem;">Comp₂</div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+
+<div class="pipeline-header" style="font-size:0.65rem;">Stage 2<br>(on-band)</div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-load" style="font-size:0.6rem;">Load K_diag</div>
+<div class="pipe-cell pipe-compute" style="font-size:0.6rem;">Comp+Mask</div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+
+<div class="pipeline-header" style="font-size:0.65rem;">Epilogue</div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-idle"></div>
+<div class="pipe-cell pipe-store" style="font-size:0.6rem;">Normalize</div>
+<div class="pipe-cell pipe-store" style="font-size:0.6rem;">Store O</div>
+</div>
+</div>
+
+<div class="legend" style="margin-top: 16px;">
+<div class="legend-item"><div class="legend-color" style="background:#7c3aed;"></div> Memory Load (async)</div>
+<div class="legend-item"><div class="legend-color" style="background:#0891b2;"></div> Compute (dot, softmax)</div>
+<div class="legend-item"><div class="legend-color" style="background:linear-gradient(135deg,#7c3aed 50%,#0891b2 50%);"></div> Overlapped Load+Compute</div>
+<div class="legend-item"><div class="legend-color" style="background:#dc2626;"></div> Store / Epilogue</div>
+</div>
+
+</div>
+
+<script>
+// Generate causal matrix
+const causalMatrix = document.getElementById('causal-matrix');
+const N = 8;
+for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        if (col > row) {
+            cell.className += ' cell-masked';
+            cell.textContent = '−∞';
+        } else if (col === row || (Math.floor(col / 2) === Math.floor(row / 2) && col <= row)) {
+            // On-diagonal block
+            if (Math.floor(row / 2) === Math.floor(col / 2)) {
+                if (col <= row) {
+                    cell.className += ' cell-stage2';
+                    cell.textContent = 'S2';
+                } else {
+                    cell.className += ' cell-masked';
+                    cell.textContent = '−∞';
+                }
+            } else {
+                cell.className += ' cell-stage1';
+                cell.textContent = 'S1';
+            }
+        } else {
+            cell.className += ' cell-stage1';
+            cell.textContent = 'S1';
+        }
+        causalMatrix.appendChild(cell);
+    }
+}
+
+// Fix: properly identify diagonal blocks
+// Re-generate with block awareness
+causalMatrix.innerHTML = '';
+const BLOCK = 2; // each "block" is 2 cells for visualization
+for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        const rowBlock = Math.floor(row / BLOCK);
+        const colBlock = Math.floor(col / BLOCK);
+        if (col > row) {
+            cell.className += ' cell-masked';
+            cell.textContent = '−∞';
+        } else if (rowBlock === colBlock) {
+            cell.className += ' cell-stage2';
+            cell.textContent = 'S2';
+        } else {
+            cell.className += ' cell-stage1';
+            cell.textContent = 'S1';
+        }
+        causalMatrix.appendChild(cell);
+    }
+}
+
+// Generate non-causal matrix
+const noncausalMatrix = document.getElementById('noncausal-matrix');
+for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+        const cell = document.createElement('div');
+        cell.className = 'cell cell-full';
+        cell.textContent = 'Full';
+        noncausalMatrix.appendChild(cell);
+    }
+}
+</script>
+</body>
+</html>

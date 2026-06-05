@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MXFP Flash Attention on NVIDIA B200</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1419; color: #e8eaed; padding: 20px; }
+h1 { text-align: center; font-size: 1.8em; margin-bottom: 10px; color: #76b900; }
+.subtitle { text-align: center; color: #8899a6; margin-bottom: 30px; font-size: 0.95em; }
+.container { max-width: 1400px; margin: 0 auto; }
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+.tab { padding: 10px 24px; background: #1a2332; border: 1px solid #2d3748; border-radius: 8px 8px 0 0;
+       cursor: pointer; font-size: 0.95em; color: #8899a6; transition: all 0.2s; }
+.tab.active { background: #1e293b; color: #76b900; border-bottom-color: #1e293b; font-weight: 600; }
+.tab:hover { color: #a3e635; }
+.panel { display: none; background: #1e293b; border-radius: 0 8px 8px 8px; padding: 24px; border: 1px solid #2d3748; }
+.panel.active { display: block; }
+
+.flow { display: flex; flex-direction: column; gap: 16px; }
+.flow-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.tensor { background: #1a2332; border: 2px solid #3b82f6; border-radius: 8px; padding: 10px 14px;
+          font-size: 0.82em; text-align: center; min-width: 100px; }
+.tensor.fp4 { border-color: #f59e0b; }
+.tensor.fp8 { border-color: #10b981; }
+.tensor.scale { border-color: #8b5cf6; border-style: dashed; }
+.tensor.output { border-color: #ef4444; }
+.tensor .name { font-weight: 700; font-size: 1.05em; display: block; margin-bottom: 4px; }
+.tensor .shape { color: #8899a6; font-size: 0.9em; }
+.tensor .dtype { color: #facc15; font-size: 0.8em; margin-top: 2px; }
+.arrow { font-size: 1.5em; color: #4b5563; }
+.op-box { background: linear-gradient(135deg, #1e3a5f, #1e293b); border: 2px solid #60a5fa;
+          border-radius: 12px; padding: 14px 20px; text-align: center; min-width: 180px; }
+.op-box .op-name { font-weight: 700; font-size: 1.1em; color: #60a5fa; }
+.op-box .op-detail { color: #8899a6; font-size: 0.8em; margin-top: 4px; }
+.op-box.mma { border-color: #76b900; background: linear-gradient(135deg, #1a3d1a, #1e293b); }
+.op-box.mma .op-name { color: #76b900; }
+.op-box.softmax { border-color: #f97316; background: linear-gradient(135deg, #3d2a1a, #1e293b); }
+.op-box.softmax .op-name { color: #f97316; }
+.op-box.quant { border-color: #a855f7; background: linear-gradient(135deg, #2d1a3d, #1e293b); }
+.op-box.quant .op-name { color: #a855f7; }
+
+.section-title { font-size: 1.2em; color: #60a5fa; margin: 20px 0 12px; border-bottom: 1px solid #2d3748; padding-bottom: 6px; }
+.kernel-loop { background: #141e2b; border: 2px dashed #4b5563; border-radius: 12px; padding: 20px; margin: 16px 0; }
+.kernel-loop .loop-header { color: #8899a6; font-size: 0.9em; margin-bottom: 12px; font-style: italic; }
+.step { display: flex; align-items: center; gap: 10px; margin: 8px 0; padding: 8px 12px;
+        background: #1a2332; border-radius: 6px; border-left: 3px solid #4b5563; }
+.step.mma { border-left-color: #76b900; }
+.step.softmax { border-left-color: #f97316; }
+.step.quant { border-left-color: #a855f7; }
+.step.load { border-left-color: #3b82f6; }
+.step .step-num { font-weight: 700; color: #4b5563; min-width: 24px; }
+.step .step-desc { font-size: 0.88em; flex: 1; }
+.step .step-ptx { color: #8899a6; font-size: 0.75em; font-family: monospace; }
+
+.perf-table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+.perf-table th, .perf-table td { padding: 10px 14px; text-align: center; border: 1px solid #2d3748; }
+.perf-table th { background: #1a2332; color: #76b900; font-size: 0.9em; }
+.perf-table td { font-size: 0.88em; }
+.perf-table tr:hover td { background: #1a2332; }
+.highlight { color: #facc15; font-weight: 600; }
+.bar { height: 20px; border-radius: 4px; background: linear-gradient(90deg, #76b900, #a3e635); margin: 4px 0; transition: width 0.5s; }
+.bar.fp8 { background: linear-gradient(90deg, #10b981, #34d399); }
+.bar.fp4 { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.bar.sdpa { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+
+.comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 16px; }
+.comp-card { background: #141e2b; border-radius: 10px; padding: 16px; border: 1px solid #2d3748; }
+.comp-card h3 { color: #60a5fa; font-size: 1em; margin-bottom: 10px; }
+.comp-card.fp8 h3 { color: #10b981; }
+.comp-card.fp4 h3 { color: #f59e0b; }
+.metric { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.85em; }
+.metric .label { color: #8899a6; }
+.metric .value { font-weight: 600; }
+.good { color: #10b981; }
+.bad { color: #ef4444; }
+.ok { color: #f59e0b; }
+
+.legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 16px 0; padding: 10px; background: #141e2b; border-radius: 8px; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.8em; }
+.legend-color { width: 14px; height: 14px; border-radius: 3px; border: 2px solid; }
+
+.e2e-output { background: #141e2b; padding: 12px; border-radius: 8px; margin: 8px 0; font-family: monospace; font-size: 0.82em; line-height: 1.6; }
+.e2e-output .prompt { color: #60a5fa; }
+.e2e-output .orig { color: #10b981; }
+.e2e-output .mxfp { color: #f59e0b; }
+.e2e-output .bad-out { color: #ef4444; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>MXFP Flash Attention on NVIDIA B200 (sm_100)</h1>
+<p class="subtitle">Triton implementation using <code>tl.dot_scaled</code> → <code>tcgen05.mma.kind::mxf8f6f4.block_scale</code></p>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab(0)">Architecture</div>
+  <div class="tab" onclick="showTab(1)">MXFP8 Kernel</div>
+  <div class="tab" onclick="showTab(2)">MXFP4 Kernel</div>
+  <div class="tab" onclick="showTab(3)">Performance</div>
+  <div class="tab" onclick="showTab(4)">E2E Accuracy</div>
+</div>
+
+<!-- Tab 0: Architecture Overview -->
+<div class="panel active" id="panel-0">
+<h2 class="section-title">Data Flow Overview</h2>
+<div class="legend">
+  <div class="legend-item"><div class="legend-color" style="border-color:#10b981;background:#10b98133"></div> FP8 E4M3</div>
+  <div class="legend-item"><div class="legend-color" style="border-color:#f59e0b;background:#f59e0b33"></div> FP4 E2M1</div>
+  <div class="legend-item"><div class="legend-color" style="border-color:#8b5cf6;background:#8b5cf633;border-style:dashed"></div> E8M0 Scale</div>
+  <div class="legend-item"><div class="legend-color" style="border-color:#ef4444;background:#ef444433"></div> Output FP32</div>
+  <div class="legend-item"><div class="legend-color" style="border-color:#76b900;background:#76b90033"></div> tcgen05.mma</div>
+</div>
+
+<svg viewBox="0 0 900 480" style="width:100%;max-width:900px;margin:0 auto;display:block">
+  <!-- Q path -->
+  <rect x="30" y="30" width="120" height="50" rx="8" fill="#1a2332" stroke="#10b981" stroke-width="2"/>
+  <text x="90" y="50" text-anchor="middle" fill="#e8eaed" font-size="11" font-weight="700">Q</text>
+  <text x="90" y="68" text-anchor="middle" fill="#8899a6" font-size="9">[B,H,M,D] fp8/fp4</text>
+
+  <rect x="30" y="90" width="120" height="35" rx="6" fill="#1a2332" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <text x="90" y="112" text-anchor="middle" fill="#c4b5fd" font-size="9">Q_scale [M, D/32]</text>
+
+  <!-- K path -->
+  <rect x="200" y="30" width="120" height="50" rx="8" fill="#1a2332" stroke="#10b981" stroke-width="2"/>
+  <text x="260" y="50" text-anchor="middle" fill="#e8eaed" font-size="11" font-weight="700">K</text>
+  <text x="260" y="68" text-anchor="middle" fill="#8899a6" font-size="9">[B,H,N,D] fp8/fp4</text>
+
+  <rect x="200" y="90" width="120" height="35" rx="6" fill="#1a2332" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <text x="260" y="112" text-anchor="middle" fill="#c4b5fd" font-size="9">K_scale [N, D/32]</text>
+
+  <!-- dot_scaled QK -->
+  <rect x="380" y="40" width="160" height="60" rx="10" fill="#1a3d1a" stroke="#76b900" stroke-width="2"/>
+  <text x="460" y="62" text-anchor="middle" fill="#76b900" font-size="11" font-weight="700">tl.dot_scaled</text>
+  <text x="460" y="80" text-anchor="middle" fill="#8899a6" font-size="9">Q @ K^T → QK [M,N]</text>
+  <text x="460" y="94" text-anchor="middle" fill="#4b5563" font-size="8">tcgen05.mma.mxf8f6f4</text>
+
+  <!-- Arrows to QK -->
+  <line x1="150" y1="55" x2="378" y2="60" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="320" y1="55" x2="378" y2="65" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Softmax -->
+  <rect x="590" y="40" width="140" height="60" rx="10" fill="#3d2a1a" stroke="#f97316" stroke-width="2"/>
+  <text x="660" y="60" text-anchor="middle" fill="#f97316" font-size="11" font-weight="700">Online Softmax</text>
+  <text x="660" y="78" text-anchor="middle" fill="#8899a6" font-size="9">exp2(QK*scale - max)</text>
+  <text x="660" y="92" text-anchor="middle" fill="#8899a6" font-size="8">P [M,N] float32</text>
+
+  <line x1="540" y1="70" x2="588" y2="70" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- P Quantization -->
+  <rect x="590" y="130" width="140" height="55" rx="10" fill="#2d1a3d" stroke="#a855f7" stroke-width="2"/>
+  <text x="660" y="150" text-anchor="middle" fill="#a855f7" font-size="11" font-weight="700">P Quantize</text>
+  <text x="660" y="167" text-anchor="middle" fill="#8899a6" font-size="9">cvt.e2m1x2 (FP4)</text>
+  <text x="660" y="180" text-anchor="middle" fill="#8899a6" font-size="8">or .to(fp8e4m3)</text>
+
+  <line x1="660" y1="100" x2="660" y2="128" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- V path -->
+  <rect x="380" y="200" width="120" height="50" rx="8" fill="#1a2332" stroke="#10b981" stroke-width="2"/>
+  <text x="440" y="220" text-anchor="middle" fill="#e8eaed" font-size="11" font-weight="700">V</text>
+  <text x="440" y="238" text-anchor="middle" fill="#8899a6" font-size="9">[B,H,D,N] fp8/fp4</text>
+
+  <rect x="380" y="260" width="120" height="35" rx="6" fill="#1a2332" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <text x="440" y="282" text-anchor="middle" fill="#c4b5fd" font-size="9">V_scale [D, N/32]</text>
+
+  <!-- dot_scaled PV -->
+  <rect x="570" y="220" width="160" height="60" rx="10" fill="#1a3d1a" stroke="#76b900" stroke-width="2"/>
+  <text x="650" y="242" text-anchor="middle" fill="#76b900" font-size="11" font-weight="700">tl.dot_scaled</text>
+  <text x="650" y="260" text-anchor="middle" fill="#8899a6" font-size="9">P @ V → acc [M,D]</text>
+  <text x="650" y="274" text-anchor="middle" fill="#4b5563" font-size="8">tcgen05.mma.mxf8f6f4</text>
+
+  <line x1="500" y1="225" x2="568" y2="245" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="660" y1="185" x2="650" y2="218" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Output -->
+  <rect x="600" y="320" width="120" height="50" rx="8" fill="#1a2332" stroke="#ef4444" stroke-width="2"/>
+  <text x="660" y="340" text-anchor="middle" fill="#e8eaed" font-size="11" font-weight="700">Output</text>
+  <text x="660" y="358" text-anchor="middle" fill="#8899a6" font-size="9">[B,H,M,D] fp32</text>
+
+  <line x1="650" y1="280" x2="655" y2="318" stroke="#4b5563" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Loop annotation -->
+  <rect x="350" y="10" width="430" height="300" rx="14" fill="none" stroke="#4b5563" stroke-width="1" stroke-dasharray="6,3"/>
+  <text x="770" y="305" fill="#4b5563" font-size="9">for n in range(0, N, BLOCK_N)</text>
+
+  <!-- Scale grouping diagram -->
+  <text x="90" y="170" text-anchor="middle" fill="#60a5fa" font-size="12" font-weight="600">Scale Grouping (group_size=32)</text>
+
+  <!-- Q/K scale along HEAD_DIM -->
+  <rect x="30" y="185" width="240" height="80" rx="6" fill="#141e2b" stroke="#2d3748"/>
+  <text x="150" y="205" text-anchor="middle" fill="#8899a6" font-size="9">Q, K: scale along HEAD_DIM</text>
+  <!-- Show 128 elements grouped into 4 groups of 32 -->
+  <rect x="45" y="215" width="50" height="16" fill="#3b82f633" stroke="#3b82f6" rx="2"/>
+  <rect x="100" y="215" width="50" height="16" fill="#10b98133" stroke="#10b981" rx="2"/>
+  <rect x="155" y="215" width="50" height="16" fill="#f59e0b33" stroke="#f59e0b" rx="2"/>
+  <rect x="210" y="215" width="50" height="16" fill="#a855f733" stroke="#a855f7" rx="2"/>
+  <text x="70" y="227" text-anchor="middle" fill="#e8eaed" font-size="7">32 elems</text>
+  <text x="125" y="227" text-anchor="middle" fill="#e8eaed" font-size="7">32 elems</text>
+  <text x="180" y="227" text-anchor="middle" fill="#e8eaed" font-size="7">32 elems</text>
+  <text x="235" y="227" text-anchor="middle" fill="#e8eaed" font-size="7">32 elems</text>
+  <text x="150" y="250" text-anchor="middle" fill="#8899a6" font-size="8">D=128 → 4 E8M0 scales per row</text>
+
+  <!-- V/P scale along BLOCK_N -->
+  <rect x="30" y="275" width="240" height="80" rx="6" fill="#141e2b" stroke="#2d3748"/>
+  <text x="150" y="295" text-anchor="middle" fill="#8899a6" font-size="9">P, V: scale along sequence (BLOCK_N)</text>
+  <rect x="45" y="305" width="50" height="16" fill="#3b82f633" stroke="#3b82f6" rx="2"/>
+  <rect x="100" y="305" width="50" height="16" fill="#10b98133" stroke="#10b981" rx="2"/>
+  <text x="70" y="317" text-anchor="middle" fill="#e8eaed" font-size="7">32 elems</text>
+  <text x="125" y="317" text-anchor="middle" fill="#e8eaed" font-size="7">32 elems</text>
+  <text x="150" y="340" text-anchor="middle" fill="#8899a6" font-size="8">BLOCK_N=64 → 2 E8M0 scales per row</text>
+
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#4b5563" stroke-width="1"/>
+    </marker>
+  </defs>
+</svg>
+
+<h2 class="section-title">Format Comparison</h2>
+<div class="comparison">
+  <div class="comp-card fp8">
+    <h3>MXFP8 — E4M3 (8 bits)</h3>
+    <div class="metric"><span class="label">Bit layout</span><span class="value">S|EEEE|MMM</span></div>
+    <div class="metric"><span class="label">Range</span><span class="value">±448</span></div>
+    <div class="metric"><span class="label">Precision</span><span class="value">~3.6 decimal digits</span></div>
+    <div class="metric"><span class="label">Storage</span><span class="value">1 byte/element</span></div>
+    <div class="metric"><span class="label">Scale format</span><span class="value">E8M0 (2^(val-127))</span></div>
+    <div class="metric"><span class="label">Group size</span><span class="value">32 elements</span></div>
+  </div>
+  <div class="comp-card fp4">
+    <h3>MXFP4 — E2M1 (4 bits)</h3>
+    <div class="metric"><span class="label">Bit layout</span><span class="value">S|EE|M</span></div>
+    <div class="metric"><span class="label">Range</span><span class="value">±6.0</span></div>
+    <div class="metric"><span class="label">Precision</span><span class="value">8 magnitudes only</span></div>
+    <div class="metric"><span class="label">Storage</span><span class="value">0.5 byte/element (packed)</span></div>
+    <div class="metric"><span class="label">Scale format</span><span class="value">E8M0 (2^(val-127))</span></div>
+    <div class="metric"><span class="label">Group size</span><span class="value">32 elements</span></div>
+    <div class="metric"><span class="label">Representable</span><span class="value">0, 0.5, 1, 1.5, 2, 3, 4, 6</span></div>
+  </div>
+</div>
+</div>
+
+<!-- Tab 1: MXFP8 Kernel -->
+<div class="panel" id="panel-1">
+<h2 class="section-title">MXFP8 Flash Attention Kernel</h2>
+<p style="color:#8899a6;font-size:0.9em;margin-bottom:16px">
+  File: <code>mxfp8_flash_attention.py</code> | Config: BLOCK_M=128, BLOCK_N=64, num_warps=4, num_stages=3
+</p>
+
+<div class="kernel-loop">
+  <div class="loop-header">▶ Outer: load Q [128, 128] fp8 + Q_scale [128, 4] once per M-tile</div>
+
+  <div class="kernel-loop" style="margin-left:16px">
+    <div class="loop-header">▶ Inner loop: for start_n in range(0, N_CTX, 64)</div>
+
+    <div class="step load">
+      <span class="step-num">1</span>
+      <span class="step-desc"><b>Load K</b> [64, 128] fp8_e4m3 + K_scale [64, 4] uint8</span>
+      <span class="step-ptx">cp.async / tl.load</span>
+    </div>
+
+    <div class="step mma">
+      <span class="step-num">2</span>
+      <span class="step-desc"><b>Q @ K^T</b> → QK [128, 64] via <code>tl.dot_scaled(q, q_scale, "e4m3", k.T, k_scale, "e4m3")</code></span>
+      <span class="step-ptx">tcgen05.mma...kind::mxf8f6f4.block_scale</span>
+    </div>
+
+    <div class="step softmax">
+      <span class="step-num">3</span>
+      <span class="step-desc"><b>Online Softmax</b>: m_ij = max(m_i, rowmax(QK*scale)); P = exp2(QK*scale - m_ij); acc *= exp2(m_i - m_ij)</span>
+      <span class="step-ptx">MUFU.EX2, FMNMX, FMUL</span>
+    </div>
+
+    <div class="step quant">
+      <span class="step-num">4</span>
+      <span class="step-desc"><b>Cast P → fp8</b>: <code>p.to(tl.float8e4nv)</code> + P_scale = 0x7F (hardcoded 1.0)</span>
+      <span class="step-ptx">F2FP.RTN.FP8</span>
+    </div>
+
+    <div class="step load">
+      <span class="step-num">5</span>
+      <span class="step-desc"><b>Load V</b> [128, 64] fp8_e4m3 (transposed: [D, BLOCK_N]) + V_scale [128, 2] uint8</span>
+      <span class="step-ptx">cp.async / tl.load</span>
+    </div>
+
+    <div class="step mma">
+      <span class="step-num">6</span>
+      <span class="step-desc"><b>P @ V</b> → acc [128, 128] via <code>tl.dot_scaled(p_fp8, p_scale, "e4m3", v, v_scale, "e4m3", acc)</code></span>
+      <span class="step-ptx">tcgen05.mma...kind::mxf8f6f4.block_scale</span>
+    </div>
+  </div>
+
+  <div class="step" style="border-left-color:#ef4444">
+    <span class="step-num">7</span>
+    <span class="step-desc"><b>Normalize</b>: output = acc / l_i; <b>Store</b> [128, 128] fp32</span>
+    <span class="step-ptx">tl.store</span>
+  </div>
+</div>
+
+<h2 class="section-title">Key Design Choices</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+  <div class="comp-card fp8">
+    <h3>V Layout: Transposed [D, N]</h3>
+    <p style="font-size:0.82em;color:#8899a6">V stored as [HEAD_DIM, N_CTX] so reduction dim (N) is contiguous for dot_scaled's RHS scale indexing: V_scale [D, N/32]</p>
+  </div>
+  <div class="comp-card fp8">
+    <h3>P Scale: Hardcoded 0x7F = 1.0</h3>
+    <p style="font-size:0.82em;color:#8899a6">After softmax, max(P)=1.0. E8M0 encoding: 2^(127-127)=1.0. No dynamic scale needed — saves ALU.</p>
+  </div>
+  <div class="comp-card fp8">
+    <h3>Scale Along Reduce Dim</h3>
+    <p style="font-size:0.82em;color:#8899a6">Q/K scales along HEAD_DIM (K-dim of Q@K^T). V scale along N (K-dim of P@V). rhs_scale shape: [N, K//32].</p>
+  </div>
+  <div class="comp-card fp8">
+    <h3>Compiler Workaround</h3>
+    <p style="font-size:0.82em;color:#8899a6">Disabled <code>OptimizeAccumulatorInit</code> pass in nvidia/compiler.py to fix "uninitialized alloc must have mutable memdesc" error with non-accumulating dot_scaled.</p>
+  </div>
+</div>
+</div>
+
+<!-- Tab 2: MXFP4 Kernel -->
+<div class="panel" id="panel-2">
+<h2 class="section-title">MXFP4 Flash Attention Kernel</h2>
+<p style="color:#8899a6;font-size:0.9em;margin-bottom:16px">
+  File: <code>mxfp4_flash_attention.py</code> | Config: BLOCK_M=128, BLOCK_N=64, num_warps=4, num_stages=4
+</p>
+
+<div class="kernel-loop">
+  <div class="loop-header">▶ Outer: load Q [128, 64] <span style="color:#f59e0b">packed uint8</span> (128 e2m1 elements packed into 64 bytes) + Q_scale [128, 4]</div>
+
+  <div class="kernel-loop" style="margin-left:16px">
+    <div class="loop-header">▶ Inner loop: for start_n in range(0, N_CTX, 64)</div>
+
+    <div class="step load">
+      <span class="step-num">1</span>
+      <span class="step-desc"><b>Load K</b> [64, 64] packed uint8 (64×128 e2m1 elements) + K_scale [64, 4] uint8</span>
+      <span class="step-ptx">cp.async / tl.load</span>
+    </div>
+
+    <div class="step mma">
+      <span class="step-num">2</span>
+      <span class="step-desc"><b>Q @ K^T</b> → QK [128, 64] via <code>tl.dot_scaled(q, q_scale, "e2m1", k.T, k_scale, "e2m1")</code></span>
+      <span class="step-ptx">tcgen05.mma...kind::mxf8f6f4.block_scale (fp4 operands)</span>
+    </div>
+
+    <div class="step softmax">
+      <span class="step-num">3</span>
+      <span class="step-desc"><b>Online Softmax</b>: m_ij, P = exp2(...), acc rescale (same as MXFP8)</span>
+      <span class="step-ptx">MUFU.EX2, FMNMX, FMUL</span>
+    </div>
+
+    <div class="step quant" style="background:#2d1a3d">
+      <span class="step-num">4a</span>
+      <span class="step-desc"><b>P Dynamic Scale</b>: per-group-of-32 amax → E8M0 scale + inv_scale</span>
+      <span class="step-ptx">FMNMX, MUFU.LOG2, ceil, MUFU.EX2</span>
+    </div>
+
+    <div class="step quant" style="background:#2d1a3d">
+      <span class="step-num">4b</span>
+      <span class="step-desc"><b>P → FP4</b>: scale P, reshape to even/odd pairs, <code>cvt.rn.satfinite.e2m1x2.f32</code></span>
+      <span class="step-ptx">cvt.rn.satfinite.e2m1x2.f32 (PTX inline asm)</span>
+    </div>
+
+    <div class="step load">
+      <span class="step-num">5</span>
+      <span class="step-desc"><b>Load V</b> [128, 32] packed uint8 (128×64 e2m1 transposed) + V_scale [128, 2] uint8</span>
+      <span class="step-ptx">cp.async / tl.load</span>
+    </div>
+
+    <div class="step mma">
+      <span class="step-num">6</span>
+      <span class="step-desc"><b>P @ V</b> → acc [128, 128] via <code>tl.dot_scaled(p_packed, p_scale, "e2m1", v, v_scale, "e2m1", acc)</code></span>
+      <span class="step-ptx">tcgen05.mma...kind::mxf8f6f4.block_scale (fp4 operands)</span>
+    </div>
+  </div>
+
+  <div class="step" style="border-left-color:#ef4444">
+    <span class="step-num">7</span>
+    <span class="step-desc"><b>Normalize</b>: output = acc / l_i; <b>Store</b> [128, 128] fp32</span>
+    <span class="step-ptx">tl.store</span>
+  </div>
+</div>
+
+<h2 class="section-title">FP4 Packing: PTX cvt.rn.satfinite.e2m1x2.f32</h2>
+<div style="background:#141e2b;padding:16px;border-radius:8px;font-family:monospace;font-size:0.82em;line-height:1.8;">
+<span style="color:#8899a6">// Pack two float32 → one uint8 with two E2M1 nibbles</span><br>
+<span style="color:#a855f7">@triton.jit</span><br>
+<span style="color:#60a5fa">def</span> _fp32x2_to_fp4x2(x_lo, x_hi):<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#8899a6">// Low nibble = x_lo, High nibble = x_hi</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#10b981">asm</span> """<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;.reg .b8 tmp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#f59e0b">cvt.rn.satfinite.e2m1x2.f32</span> tmp, $hi, $lo;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;cvt.u32.u8 $out, tmp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;"""<br>
+<br>
+<span style="color:#8899a6">// Packing layout in each byte:</span><br>
+<span style="color:#8899a6">// Bit 7..4: element[2i+1] (odd index)</span><br>
+<span style="color:#8899a6">// Bit 3..0: element[2i]   (even index)</span><br>
+<br>
+<span style="color:#8899a6">// E2M1 nibble encoding (4 bits): S|EE|M</span><br>
+<span style="color:#f59e0b">// 0b0000=0.0  0b0001=0.5  0b0010=1.0  0b0011=1.5</span><br>
+<span style="color:#f59e0b">// 0b0100=2.0  0b0101=3.0  0b0110=4.0  0b0111=6.0</span><br>
+<span style="color:#f59e0b">// + 0b1000 for negative sign</span>
+</div>
+</div>
+
+<!-- Tab 3: Performance -->
+<div class="panel" id="panel-3">
+<h2 class="section-title">Performance Comparison (B=1, H=40, N=65536, D=128)</h2>
+
+<table class="perf-table">
+<tr><th>Kernel</th><th>Time (ms)</th><th>TFLOPS</th><th>vs SDPA FP16</th><th>Chart</th></tr>
+<tr>
+  <td>SDPA FP16 (cuDNN)</td><td>64.7</td><td class="highlight">1360</td><td>1.00x</td>
+  <td><div class="bar sdpa" style="width:90%"></div></td>
+</tr>
+<tr>
+  <td>SDPA BF16 (cuDNN)</td><td>62.2</td><td class="highlight">1415</td><td>1.04x</td>
+  <td><div class="bar sdpa" style="width:94%"></div></td>
+</tr>
+<tr>
+  <td>MXFP8 (E4M3) Ours</td><td>166.5</td><td class="highlight">528</td><td>0.39x</td>
+  <td><div class="bar fp8" style="width:35%"></div></td>
+</tr>
+<tr>
+  <td>MXFP4 (E2M1) Ours</td><td>126.0</td><td class="highlight">698</td><td>0.51x</td>
+  <td><div class="bar fp4" style="width:46%"></div></td>
+</tr>
+<tr>
+  <td>MXFP4 no-softmax ceiling</td><td>80.4</td><td class="highlight">1094</td><td>0.80x</td>
+  <td><div class="bar fp4" style="width:73%"></div></td>
+</tr>
+</table>
+
+<h2 class="section-title">Bottleneck Analysis (MXFP4 SASS Breakdown)</h2>
+<table class="perf-table">
+<tr><th>Category</th><th>Instruction Count</th><th>% of Loop</th><th>Notes</th></tr>
+<tr><td>MMA (tcgen05)</td><td>3</td><td>0.4%</td><td>2× QK + 1× PV, async tensor core</td></tr>
+<tr><td>FMUL</td><td>201</td><td>26%</td><td>acc*alpha rescaling dominates</td></tr>
+<tr><td>MUFU.EX2</td><td>67</td><td>9%</td><td>exp2 for softmax + alpha</td></tr>
+<tr><td>FMNMX</td><td>70</td><td>9%</td><td>rowmax + P group amax</td></tr>
+<tr><td>FADD</td><td>148</td><td>19%</td><td>l_i accumulation, qk-m_ij</td></tr>
+<tr><td>LDG/STS/LDS</td><td>112</td><td>14%</td><td>K, V, scale loads</td></tr>
+<tr><td>BAR.SYNC</td><td>17</td><td>2%</td><td>Warp synchronization</td></tr>
+<tr><td>Other (CVT, MOV, etc)</td><td>~163</td><td>21%</td><td>FP4 pack, shuffles, etc</td></tr>
+<tr style="font-weight:700"><td>Total per iteration</td><td>~781</td><td>100%</td><td>Inner loop body</td></tr>
+</table>
+
+<h2 class="section-title">Why Peak is Hard to Reach</h2>
+<div class="comparison">
+  <div class="comp-card">
+    <h3>Softmax is the Bottleneck (41% overhead)</h3>
+    <div class="metric"><span class="label">Ceiling (no softmax)</span><span class="value">1094 TFLOPS</span></div>
+    <div class="metric"><span class="label">With fixed P scale</span><span class="value">777 TFLOPS</span></div>
+    <div class="metric"><span class="label">With dynamic P scale</span><span class="value">698 TFLOPS</span></div>
+    <div class="metric"><span class="label">Softmax overhead</span><span class="value bad">+41% time</span></div>
+    <div class="metric"><span class="label">P quant overhead</span><span class="value ok">+12% time</span></div>
+  </div>
+  <div class="comp-card">
+    <h3>Structural Limitations</h3>
+    <div class="metric"><span class="label">Pointer loads (no TMA)</span><span class="value bad">No async prefetch</span></div>
+    <div class="metric"><span class="label">Small BLOCK_N=64</span><span class="value ok">Limited MMA size</span></div>
+    <div class="metric"><span class="label">Compiler pass disabled</span><span class="value ok">No acc init opt</span></div>
+    <div class="metric"><span class="label">BLOCK_N=128 tested</span><span class="value bad">Worse (reg pressure)</span></div>
+  </div>
+</div>
+</div>
+
+<!-- Tab 4: E2E Accuracy -->
+<div class="panel" id="panel-4">
+<h2 class="section-title">End-to-End Accuracy: Qwen3-0.6B</h2>
+<p style="color:#8899a6;font-size:0.9em;margin-bottom:16px">
+  Monkey-patching <code>F.scaled_dot_product_attention</code> with our MXFP kernels. Both prefill and decode use the patched path.
+</p>
+
+<table class="perf-table">
+<tr><th>Metric</th><th>FP16 SDPA</th><th>MXFP8 (E4M3)</th><th>MXFP4 (E2M1)</th></tr>
+<tr><td>Token match vs FP16</td><td>—</td><td class="good">100%</td><td class="bad">21.2%</td></tr>
+<tr><td>PPL (transformer text)</td><td>8.08</td><td class="good">~8.08</td><td class="bad">19.30 (+139%)</td></tr>
+<tr><td>PPL (Python text)</td><td>4.09</td><td class="good">~4.09</td><td class="bad">10.26 (+151%)</td></tr>
+<tr><td>Logit cosine sim</td><td>—</td><td class="good">~1.000</td><td class="ok">0.772</td></tr>
+<tr><td>Generation coherent?</td><td>✓</td><td class="good">✓ Identical</td><td class="bad">✗ Degraded</td></tr>
+</table>
+
+<h2 class="section-title">Generation Samples</h2>
+
+<div class="e2e-output">
+<span class="prompt">Prompt: "The capital of France is"</span><br>
+<span class="orig">FP16:  " Paris. The capital of Italy is Rome. The capital of Spain is Madrid."</span><br>
+<span class="orig">MXFP8: " Paris. The capital of Italy is Rome. The capital of Spain is Madrid."</span><br>
+<span class="bad-out">MXFP4: " the same as the capital of France. So The capital of France is the same..."</span>
+</div>
+
+<div class="e2e-output">
+<span class="prompt">Prompt: "def fibonacci(n):\n    \"\"\"Return the nth Fibonacci number.\"\"\""</span><br>
+<span class="orig">FP16:  "if n == 0: return 0 elif n == 1: return 1 else: ..."</span><br>
+<span class="orig">MXFP8: "if n == 0: return 0 elif n == 1: return 1 else: ..."</span><br>
+<span class="bad-out">MXFP4: "if n < 2: return \n\n\n\n(n, Fib(0) = ..."</span>
+</div>
+
+<div class="e2e-output">
+<span class="prompt">Prompt: "1 + 1 = 2, 2 + 2 = 4, 3 + 3 ="</span><br>
+<span class="orig">FP16:  " 6, 4 + 4 = 8, 5 + 5 = 10, 6 + 6 = 12, 7 + 7 = 14"</span><br>
+<span class="orig">MXFP8: " 6, 4 + 4 = 8, 5 + 5 = 10, 6 + 6 = 12, 7 + 7 = 14"</span><br>
+<span class="bad-out">MXFP4: " 4, , + + + + +, + + + = + + +, + + + + +, ..."</span>
+</div>
+
+<h2 class="section-title">Conclusion</h2>
+<div class="comparison">
+  <div class="comp-card fp8">
+    <h3>MXFP8: Production Ready</h3>
+    <p style="font-size:0.85em;color:#8899a6">
+      FP8 E4M3 with E8M0 block scales preserves model quality perfectly — zero degradation even on a 0.6B model.
+      Suitable as a drop-in replacement for FP16 attention in inference.
+    </p>
+  </div>
+  <div class="comp-card fp4">
+    <h3>MXFP4: Needs QAT</h3>
+    <p style="font-size:0.85em;color:#8899a6">
+      FP4 E2M1 with only 8 representable magnitudes causes significant quality loss when applied post-training.
+      Requires quantization-aware training or careful calibration to be practical.
+    </p>
+  </div>
+</div>
+</div>
+
+</div>
+
+<script>
+function showTab(idx) {
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === idx));
+  document.querySelectorAll('.panel').forEach((p, i) => p.classList.toggle('active', i === idx));
+}
+</script>
+</body>
+</html>
